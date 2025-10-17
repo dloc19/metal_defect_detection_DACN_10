@@ -9,4 +9,6 @@ pyqt5
 Pillow
 torch
 torchvision
-```
+onnx
+onnxruntime
+onnxruntime-gpu

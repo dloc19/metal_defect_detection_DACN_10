@@ -12,6 +12,14 @@ from utils import list_cameras, qimg_from_bgr, is_no_signal
 from model import build_model, CamPlusPlus, heatmap_to_mask, mask_to_bboxes, overlay_heatmap, class_name_from_map
 from worker import Worker
 
+# ONNX Runtime support
+try:
+    from onnx_inference import create_onnx_inference
+    ONNX_AVAILABLE = True
+except ImportError:
+    ONNX_AVAILABLE = False
+    print("⚠️  ONNX Runtime not available. Using PyTorch inference.")
+
 # ===================== THEME =====================
 DARK_QSS = """
 * { font-family: Segoe UI, Roboto, Arial; }
@@ -125,15 +133,34 @@ class MainWindow(QtWidgets.QMainWindow):
         # state
         self.source = (int(cams[0]) if cams else 0)
         self.save_dir = os.path.abspath(config.SAVE_DIR)
-        self.idx_to_class, self.model = self.load_model()
-        self.cam_top = CamPlusPlus(self.model, config.CAM_TOP_LAYER)
-        self.cam_aux = CamPlusPlus(self.model, config.CAM_AUX_LAYER)
+        self.idx_to_class, self.model, self.onnx_inference = self.load_model()
+        self.cam_top = CamPlusPlus(self.model, config.CAM_TOP_LAYER) if self.model else None
+        self.cam_aux = CamPlusPlus(self.model, config.CAM_AUX_LAYER) if self.model else None
         self.worker = None
 
     # ---------- helpers ----------
     def load_model(self):
         with open(config.MAP_PATH, "r", encoding="utf-8") as f:
             idx_to_class = json.load(f)
+        
+        # Try ONNX first if enabled and available
+        if config.USE_ONNX and ONNX_AVAILABLE and os.path.exists(config.ONNX_PATH):
+            print("🚀 Loading ONNX model for faster inference...")
+            onnx_inference = create_onnx_inference(
+                config.ONNX_PATH, 
+                config.MAP_PATH,
+                img_size=config.IMG_SIZE,
+                use_gpu=config.ONNX_USE_GPU,
+                alpha_thr=config.ALPHA_THR
+            )
+            if onnx_inference:
+                print("✅ ONNX model loaded successfully")
+                return idx_to_class, None, onnx_inference
+            else:
+                print("⚠️  ONNX loading failed, falling back to PyTorch")
+        
+        # Fallback to PyTorch
+        print("🐍 Loading PyTorch model...")
         num_classes = len(idx_to_class)
         model = build_model(num_classes).to(config.DEVICE).eval()
 
@@ -144,7 +171,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if k.startswith("module."): k = k[len("module."):]
             new_state[k] = v
         model.load_state_dict(new_state, strict=False)
-        return idx_to_class, model
+        print("✅ PyTorch model loaded successfully")
+        return idx_to_class, model, None
 
     def _show_on_label(self, lbl, img_bgr):
         h,w = img_bgr.shape[:2]
@@ -224,7 +252,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def start_stream(self):
         os.makedirs(self.save_dir, exist_ok=True)
-        self.worker = Worker(self.source, self.model, self.idx_to_class, self.save_dir)
+        self.worker = Worker(self.source, self.model, self.idx_to_class, self.save_dir, self.onnx_inference)
         self.worker.frame_ready.connect(self.update_frames)
         self.worker.start()
         self.btn_start.setEnabled(False); self.btn_stop.setEnabled(True)
@@ -244,6 +272,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def infer_on_frame(self, frame_bgr):
         """Ảnh đơn: trả (view, status_text, is_ok) theo ngưỡng α + CAM."""
+        view = frame_bgr.copy()
+        
+        # Use ONNX inference if available
+        if self.onnx_inference:
+            cls_name, max_conf, probs = self.onnx_inference.predict(frame_bgr)
+            
+            if max_conf < config.ALPHA_THR:
+                return view, "OK", True
+            
+            # For ONNX, we can't do Grad-CAM easily, so just return the prediction
+            return view, f"✖ {cls_name} ({max_conf:.2f})", False
+        
+        # Fallback to PyTorch inference with Grad-CAM
+        if not self.model:
+            return view, "Model not loaded", False
+            
         x = config.TF(Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))).unsqueeze(0).to(config.DEVICE)
         with torch.no_grad():
             logits = self.model(x)
@@ -253,7 +297,6 @@ class MainWindow(QtWidgets.QMainWindow):
         cls_name = class_name_from_map(self.idx_to_class, cls_idx)
         max_conf = float(probs[cls_idx])
 
-        view = frame_bgr.copy()
         if max_conf < config.ALPHA_THR:
             return view, "OK", True
 
@@ -270,22 +313,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 pct -= config.PCT_STEP
             return [], hm
 
-        bboxes, hm = try_cam(self.cam_top)
-        if len(bboxes) == 0:
-            bboxes, hm = try_cam(self.cam_aux)
+        if self.cam_top and self.cam_aux:
+            bboxes, hm = try_cam(self.cam_top)
+            if len(bboxes) == 0:
+                bboxes, hm = try_cam(self.cam_aux)
 
-        if len(bboxes) > 0:
-            for (x1,y1,w,h) in bboxes:
-                cv2.rectangle(view, (x1,y1), (x1+w,y1+h), (0,255,0), 2)
-        else:
-            view = overlay_heatmap(view, hm)
+            if len(bboxes) > 0:
+                for (x1,y1,w,h) in bboxes:
+                    cv2.rectangle(view, (x1,y1), (x1+w,y1+h), (0,255,0), 2)
+            else:
+                view = overlay_heatmap(view, hm)
 
         return view, f"✖ {cls_name} ({max_conf:.2f})", False
 
     def closeEvent(self, e):
         self.stop_stream()
         try:
-            self.cam_top.remove(); self.cam_aux.remove()
+            if self.cam_top: self.cam_top.remove()
+            if self.cam_aux: self.cam_aux.remove()
         except Exception:
             pass
         e.accept()
