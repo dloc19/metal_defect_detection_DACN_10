@@ -57,19 +57,3 @@ python metal_defect_detection/utils/scripts/augment_class_equalize.py \
   --data metal_defect_detection/dataset \
   --target 1200 --ext jpg
 ```
-
-## Gợi ý cải thiện
-- Độ chính xác:
-  - Tái huấn luyện với augment cân bằng theo lớp, mixup/cutmix (PyTorch), và label smoothing.
-  - Fine-tune MobileNetV2 với scheduler cosine + warmup, early stopping.
-  - Thử backbone khác (EfficientNet-B0/B2, ConvNeXt-T) nếu latency cho phép.
-- Tốc độ:
-  - Bật `torch.backends.cudnn.benchmark = True` khi dùng GPU, batch inference 1 khung nhưng tái sử dụng tensor/stream.
-  - Chuyển model sang TorchScript hoặc ONNX + TensorRT trên Windows để giảm latency.
-- Ổn định suy luận video:
-  - Dùng cửa sổ trượt trên xác suất để làm mượt (ví dụ trung bình 5 khung) trước khi so `ALPHA_THR`.
-  - Ghép heuristic phát hiện cảnh mới bằng `SCENE_DELTA_THR` với debounce thời gian tối thiểu giữa 2 lần lưu.
-- UX:
-  - Cho phép chọn `CKPT_PATH`, `MAP_PATH`, `ALPHA_THR` trực tiếp từ GUI và lưu cấu hình gần nhất.
-  - Thêm nút toggle hiển thị heatmap/bbox.
-
