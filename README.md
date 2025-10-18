@@ -48,12 +48,3 @@ cmake --build . --config Release
 
 Mặc định đọc ảnh từ `../data/images` (sửa trong `cpp/src/main.cpp`).
 
-## Augment dữ liệu cân bằng theo lớp
-Script: `metal_defect_detection/utils/scripts/augment_class_equalize.py`
-
-Ví dụ:
-```
-python metal_defect_detection/utils/scripts/augment_class_equalize.py \
-  --data metal_defect_detection/dataset \
-  --target 1200 --ext jpg
-```
